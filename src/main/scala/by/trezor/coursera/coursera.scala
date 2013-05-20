@@ -4,10 +4,14 @@ import java.io.File
 import java.util.logging._
 import scala.collection.JavaConverters.asScalaIteratorConverter
 import scalaj.http._
+import scala.concurrent.{future, blocking, Future, Await}
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
 import org.rogach.scallop._
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.streum.configrity._
+import java.net.URLDecoder
 
 
 object CouseraParser {
@@ -59,19 +63,20 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
 
 class Coursera(course: String, username: String, password: String, directory: String, info: Boolean) {
 
-  private final val SessionIdCookieName = "sessionid"
-  private final val SessionCookieName = "session"
-  private final val MaestroLoginCookieName = "maestro_login"
-  private final val MaestroLoginFlagName = "maestro_login_flag"
-  private final val CsrfTokenCookieName = "csrf_token"
-  private final val PasswordFieldName = "password"
-  private final val UsernameFieldName = "email_address"
-  private final val ConnectionTimeout = 20000
-  private final val LectureUrl = "http://class.coursera.org/%s/lecture/index"
-  private final val loginUrl = "https://www.coursera.org/maestro/api/user/login"
-  private final val RefererUrl = "https://www.coursera.org"
-  private final val ClassAuthUrl = "https://class.coursera.org/%s/auth/auth_redirector?" +
+  private final val SessionIdCookieName           = "sessionid"
+  private final val SessionCookieName             = "session"
+  private final val MaestroLoginCookieName        = "maestro_login"
+  private final val MaestroLoginFlagName          = "maestro_login_flag"
+  private final val CsrfTokenCookieName           = "csrf_token"
+  private final val PasswordFieldName             = "password"
+  private final val UsernameFieldName             = "email_address"
+  private final val ConnectionTimeout             = 20000
+  private final val LectureUrl                    = "http://class.coursera.org/%s/lecture/index"
+  private final val loginUrl                      = "https://www.coursera.org/maestro/api/user/login"
+  private final val RefererUrl                    = "https://www.coursera.org"
+  private final val ClassAuthUrl                  = "https://class.coursera.org/%s/auth/auth_redirector?" +
     "type=login&subtype=normal&email=&visiting=%s"
+  private final val DefaultCodePage               = "UTF-8"
 
   private final val LOG = Logger.getLogger("coursera")
 
@@ -89,9 +94,7 @@ class Coursera(course: String, username: String, password: String, directory: St
       s match {
         case Array(a, b) => a -> b
         case _ => "" -> ""
-      }
-      )
-    )
+      }))
   }
 
   lazy val getCsrfToken: String = {
@@ -117,8 +120,8 @@ class Coursera(course: String, username: String, password: String, directory: St
     List(("Cookie", classAuthCookie mkString "; "))
   }
 
-  def prepareSessionHeaders(session: String): List[(String, String)] =
-    List(("Cookie", SessionCookieName + "=" + session))
+  lazy val sessionHeaders: List[(String, String)] =
+    List(("Cookie", SessionCookieName + "=" + getSessionCookie))
 
   lazy val getAuthCookie: List[String] = {
     Http.post(loginUrl).headers(prepareLoginHeaders(getCsrfToken)).
@@ -141,10 +144,7 @@ class Coursera(course: String, username: String, password: String, directory: St
     }
   }
 
-  def getClassPage: String = {
-    Http(getLectureUrl).headers(prepareSessionHeaders(getSessionCookie)).
-      options(couseraHttpOptions).asString
-  }
+  def getClassPage: String = Http(getLectureUrl).headers(sessionHeaders).options(couseraHttpOptions).asString
 
   def getFilesList(chapters: Option[List[Int]]): List[(List[String], Int)] = {
     val files = CouseraParser.parsePage(getClassPage).zipWithIndex
@@ -154,42 +154,136 @@ class Coursera(course: String, username: String, password: String, directory: St
     }
   }
 
-  def downloadFile(directory: String, url: String) {
-
+  def downloadFile(filename: String, url: String, number: Int) {
+    println(number)
+    println(filename)
+    println(url)
   }
 
-  def downloadChapters(files: List[List[String]]) {
-      files.foreach(chapter => processChapter(chapter))
-  }
-
-  def processChapter(chapter: List[String]) {
-    val dir = new File(directory, chapter.head)
-    if (!dir.exists && !dir.isDirectory && !dir.mkdirs) {
-      LOG.log(Level.SEVERE, "Cannot create directory " + dir.getCanonicalPath)
-    } else {
-      chapter.foreach(url => downloadFile(dir.getCanonicalPath, url))
+  def downloadChapters(files: Iterable[(String, List[(Int, String, String)])]) {
+    var number = 0
+    files.zipWithIndex.foreach {
+      case(chapter, i) => {
+        downloadChapter(chapter._1, chapter._2, number)
+        number += chapter._2.size
+      }
     }
   }
 
-  def showChapter(chapter: List[String], index: Int) {
-    println("%slecture #%s: %s%s" format(Console.RED, index, chapter.head, Console.RESET))
+  def downloadChapter(chapterDirectory: String, chapter: List[(Int, String, String)], number: Int) {
+    val dir = new File(directory, chapterDirectory)
+    if (!dir.exists && !dir.isDirectory && !dir.mkdirs) {
+      LOG.log(Level.SEVERE, "Cannot create directory " + dir.getCanonicalPath)
+    } else {
+      chapter.zipWithIndex.foreach {
+        case(data, i) => {
+          downloadFile(new File(dir, data._2).getCanonicalPath, data._3, number + i + 1)
+        }
+      }
+    }
+  }
+
+  def showChapter(index: Int, chapterDirectory: String, chapter: List[(Int, String, String)]) {
+    println("%slecture #%s: %s%s" format(Console.RED, index, chapterDirectory, Console.RESET))
     println()
-    chapter.tail.zipWithIndex.foreach(x => println("%s%s: %s%s" format(Console.GREEN, x._2, x._1, Console.RESET)))
+    val dir = new File(directory, chapterDirectory).getCanonicalPath
+    chapter.zipWithIndex.foreach {
+      case ((size, name, url), i) => {
+        val file = new File(dir, name)
+        if (!file.exists()) {
+          println("%s%s: %s%s" format(Console.GREEN, i, name, Console.RESET))
+        } else if (size != -1 && file.length != size) {
+          println("%s%s: %s%s" format(Console.MAGENTA, i, name, Console.RESET))
+        } else {
+          println("%s%s: %s%s" format(Console.BLUE, i, name, Console.RESET))
+        }
+      }
+    }
     println()
   }
 
-  def showChapters(files: List[(List[String], Int)]) {
-    files.foreach(x => showChapter(x._1, x._2 + 1))
+  def showChapters(files: Map[Int, (String, List[(Int, String, String)])]) {
+    files.foreach(value => showChapter(value._1, value._2._1, value._2._2))
   }
 
-  def getFilePath(filename: String): String = new File(directory, filename).getCanonicalPath
+  def parseContentDisposition(value: String): String = value.split("=").toList.last.replaceAll("\"*$|^\"*", "")
+
+  def parseUrlFilename(url: String): String = url.split("/").toList.last
+
+  def getContentDisposition(headers: Map[String, List[String]]): Option[String] = headers.get("Content-Disposition") match {
+    case Some(List(value)) => Option(parseContentDisposition(value))
+    case _ => None
+  }
+
+  def parseUriParameters(uri: String): Map[String, List[String]] = {
+    val params = collection.mutable.Map[String, List[String]]()
+    val parts = uri split "\\?"
+    if (parts.length > 1) {
+      val query = parts(1)
+      query.split("&") map { param =>
+        val pair = param split "="
+        val key = URLDecoder.decode(pair(0), DefaultCodePage)
+        val value = pair.length match {
+          case l if l > 1 => URLDecoder.decode(pair(1), DefaultCodePage)
+          case _ => ""
+        }
+        val values = params get key match {
+          case Some(list: List[String]) => list :+ value
+          case None => List(value)
+        }
+        params += (key -> values)
+        values
+      }
+    }
+    params.toMap
+  }
+
+  def getFileData(url: String): (Int, String, String) = {
+    // returns content-length, filename and url
+    val response = Http(url).headers(sessionHeaders).
+      options(couseraHttpOptions).option(HttpOptions.method("HEAD")).asCodeHeaders
+    response match {
+      case (200, headers) => {
+        (
+          headers.getOrElse("Content-Length", List("-1"))(0).toInt,
+          getContentDisposition(headers) match {
+            case Some(value) => value
+            case _ => parseUrlFilename(url)
+          },
+          url
+        )
+      }
+      case (302, headers) => {
+        val location = headers.get("Location").get(0)
+        val res = Http(location).options(couseraHttpOptions).asCodeHeaders
+        (
+          res._2.getOrElse("Content-Length", List("-1"))(0).toInt,
+          getContentDisposition(headers) match {
+            case Some(value) => value
+            case _ => parseContentDisposition(parseUriParameters(location).get("response-content-disposition").get(0))
+          },
+          location
+        )
+      }
+    }
+  }
+
+  def getLectureData(files: List[String]): List[(Int, String, String)] = {
+    val tasks: List[Future[(Int, String, String)]] = files.map { url => future { blocking { getFileData(url) } }}
+    val futures: Future[List[(Int, String, String)]] = Future.sequence(tasks)
+    Await.result(futures, 10.minutes).toList
+  }
+
+  def getLecturesData(files: List[(List[String], Int)]): Map[Int, (String, List[(Int, String, String)])] = {
+    files.map(x => (x._2, (x._1.head, getLectureData(x._1.tail)))).toMap
+  }
 
   def apply(chapters: Option[List[Int]]) {
-    val files = getFilesList(chapters)
+    val files = getLecturesData(getFilesList(chapters))
     if (info) {
       showChapters(files)
     } else {
-      downloadChapters(files.map(_._1))
+      downloadChapters(files.values)
     }
   }
 
