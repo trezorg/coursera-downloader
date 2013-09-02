@@ -42,9 +42,10 @@ object CourseraOutput {
 
 object CourseraParser {
 
-  private final val RootElement = ".course-item-list-section-list"
-  private final val HeaderSubElement = "h3"
-  private final val ChapterElement = ".course-lecture-item-resource"
+  private val RootElement = ".course-item-list-section-list"
+  private val HeaderSubElement = "h3"
+  private val ChapterElement = ".course-lecture-item-resource"
+  private val Charset = "UTF-8"
 
   def parsePage(st: String): List[List[String]] = {
     CourseraOutput("Getting files list...")
@@ -57,7 +58,7 @@ object CourseraParser {
       for (
         links: Element <- el.select(ChapterElement).iterator().asScala;
         link: Element <- links.select("a").iterator().asScala
-      ) yield Http.urlDecode(link.attr("href"))
+      ) yield Http.urlDecode(link.attr("href"), Charset)
     ).toList
   }
 
@@ -94,28 +95,28 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
 
 class Coursera(course: String, username: String, password: String, directory: String, optionsMap: Map[String, Boolean]) {
 
-  val SessionIdCookieName           = "sessionid"
-  val SessionCookieName             = "session"
-  val MaestroLoginCookieName        = "maestro_login"
-  val MaestroLoginFlagName          = "maestro_login_flag"
-  val CsrfTokenCookieName           = "csrf_token"
-  val PasswordFieldName             = "password"
-  val UsernameFieldName             = "email_address"
-  val ConnectionTimeout             = 3600 * 1000
-  val OkResponseCode                = 200
-  val RedirectResponseCode          = 302
-  val LectureUrl                    = "http://class.coursera.org/%s/lecture/index"
-  val loginUrl                      = "https://www.coursera.org/maestro/api/user/login"
-  val ReferrerUrl                   = "https://www.coursera.org"
-  val ClassAuthUrl                  = "https://class.coursera.org/%s/auth/auth_redirector?type=login&subtype=normal&email=&visiting=%s"
-  val DefaultCodePage               = "UTF-8"
-  val txt                           = optionsMap.getOrElse("txt", false)
-  val srt                           = optionsMap.getOrElse("srt", false)
-  val pdf                           = optionsMap.getOrElse("pdf", false)
-  val mp4                           = optionsMap.getOrElse("mp4", false)
-  val pptx                          = optionsMap.getOrElse("pptx", false)
-  val update                        = optionsMap.getOrElse("update", false)
-  val LOG = Logger.getLogger("coursera")
+  private val SessionIdCookieName           = "sessionid"
+  private val SessionCookieName             = "session"
+  private val MaestroLoginCookieName        = "maestro_login"
+  private val MaestroLoginFlagName          = "maestro_login_flag"
+  private val CsrfTokenCookieName           = "csrf_token"
+  private val PasswordFieldName             = "password"
+  private val UsernameFieldName             = "email"
+  private val ConnectionTimeout             = 3600 * 1000
+  private val OkResponseCode                = 200
+  private val RedirectResponseCode          = 302
+  private val LectureUrl                    = "http://class.coursera.org/%s/lecture/index"
+  private val loginUrl                      = "https://accounts.coursera.org/api/v1/login"
+  private val ReferrerUrl                   = "https://accounts.coursera.org/signin"
+  private val ClassAuthUrl                  = "https://class.coursera.org/%s/auth/auth_redirector?type=login&subtype=normal&email=&visiting=%s"
+  private val DefaultCodePage               = "UTF-8"
+  private val txt                           = optionsMap.getOrElse("txt", false)
+  private val srt                           = optionsMap.getOrElse("srt", false)
+  private val pdf                           = optionsMap.getOrElse("pdf", false)
+  private val mp4                           = optionsMap.getOrElse("mp4", false)
+  private val pptx                          = optionsMap.getOrElse("pptx", false)
+  private val update                        = optionsMap.getOrElse("update", false)
+  private val LOG = Logger.getLogger("coursera")
   def isTxt(filename: String)       = txt && filename.endsWith(".txt")
   def isPdf(filename: String)       = pdf && filename.endsWith(".pdf")
   def isSrt(filename: String)       = srt && filename.endsWith(".srt")
@@ -127,7 +128,7 @@ class Coursera(course: String, username: String, password: String, directory: St
   val courseraHttpOptions: List[HttpOptions.HttpOption] =
     List(HttpOptions.connTimeout(ConnectionTimeout), HttpOptions.readTimeout(ConnectionTimeout))
 
-  lazy val getClassAuthUrl: String = String.format(ClassAuthUrl, course, Http.urlEncode(getLectureUrl))
+  lazy val getClassAuthUrl: String = String.format(ClassAuthUrl, course, Http.urlEncode(getLectureUrl, DefaultCodePage))
 
   val cookiesNames = List(SessionIdCookieName, MaestroLoginCookieName, MaestroLoginFlagName)
 
@@ -155,7 +156,7 @@ class Coursera(course: String, username: String, password: String, directory: St
 
   def prepareClassAuthHeaders: List[(String, String)] = {
     val classAuthCookie = for (
-      map <- getAuthCookie.map(cookiesToMap(_));
+      map <- getAuthCookie.map(cookiesToMap);
       (name, value) <- map
       if cookiesNames.contains(name))
     yield name + "=" + value
@@ -166,10 +167,11 @@ class Coursera(course: String, username: String, password: String, directory: St
     List(("Cookie", SessionCookieName + "=" + getSessionCookie))
 
   lazy val getAuthCookie: List[String] = {
-    Http.post(loginUrl).headers(prepareLoginHeaders(getCsrfToken)).
+    val res = Http.post(loginUrl).headers(prepareLoginHeaders(getCsrfToken)).
       options(courseraHttpOptions).
       params(prepareLoginParams).
-      asHeadersAndParse(Http.readString)._2.get("Set-Cookie").head
+      asHeadersAndParse(Http.readString)
+    res._2.get("Set-Cookie").head
   }
 
   def getSessionCookie: String = {
@@ -179,7 +181,7 @@ class Coursera(course: String, username: String, password: String, directory: St
       asHeadersAndParse(Http.readString)._2.get("Set-Cookie") match {
       case Some(list: List[String]) => {
         for (
-          map <- list.map(cookiesToMap(_));
+          map <- list.map(cookiesToMap);
           (name, value) <- map
           if name == SessionCookieName
         ) yield value}.mkString
@@ -228,7 +230,7 @@ class Coursera(course: String, username: String, password: String, directory: St
         f onComplete {
           case Success((true, filename)) => terminalWaitActor ! Message(filename, state = true)
           case Success((false, filename)) => terminalWaitActor ! Message(filename, state = false)
-          case Failure(t) => CourseraOutput("An error has occurred: " + t.getMessage)
+          case Failure(t) => CourseraOutput("An error has occurred: " + t.getStackTraceString)
         }
       })
       val futures: Future[List[(Boolean, String)]] = Future.sequence(tasks)
@@ -293,8 +295,10 @@ class Coursera(course: String, username: String, password: String, directory: St
 
   def getFileData(url: String): Option[(Int, String, String)] = {
     // returns content-length, filename and url
-    val response = Http(url).headers(sessionHeaders).
-      options(courseraHttpOptions).option(HttpOptions.method("HEAD")).asCodeHeaders
+    val response = Http(url).
+      headers(sessionHeaders).
+      options(courseraHttpOptions ::: List(HttpOptions.method("HEAD"))).
+      option(_.setInstanceFollowRedirects(false)).asCodeHeaders
     response match {
       case (OkResponseCode, headers) => {
         Some((
@@ -308,7 +312,7 @@ class Coursera(course: String, username: String, password: String, directory: St
       }
       case (RedirectResponseCode, headers) => {
         val location = headers.get("Location").get(0)
-        val res = Http(location).options(courseraHttpOptions).asCodeHeaders
+        val res = Http(location).headers(sessionHeaders).options(courseraHttpOptions).asCodeHeaders
         Some((
           res._2.getOrElse("Content-Length", List("-1"))(0).toInt,
           getContentDisposition(headers) match {
@@ -357,7 +361,7 @@ class Coursera(course: String, username: String, password: String, directory: St
         downloadChapters(files.values)
       }
     } catch {
-      case e: Exception => CourseraOutput("An error has occurred: %s" format e.getMessage)
+      case e: Exception => CourseraOutput("An error has occurred: %s" format e.getStackTraceString)
     } finally {
       terminalWaitActor ! Stop
     }
