@@ -74,7 +74,7 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
   val password = opt[String](required = false, descr = "set password")
   val filename = opt[String](required = false, descr = "set configuration file")
   val info = opt[Boolean](required = false, descr = "show available files and exit", default = Some(false))
-  val force = opt[Boolean](required = false, descr = "force re-download files if exist", default = Some(false), short = 'u')
+  val force = opt[Boolean](required = false, descr = "force re-download files", default = Some(false), short = 'u')
   val pdf = opt[Boolean](required = false, descr = "get only pdf files", default = Some(false), short = 'm')
   val txt = opt[Boolean](required = false, descr = "get only txt files", default = Some(false))
   val srt = opt[Boolean](required = false, descr = "get only srt files", default = Some(false))
@@ -84,8 +84,12 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
     descr = "set directory to save files. default is a current directory.",
     validate = a => new File(a).isDirectory)
   val chapter = opt[List[Int]](required = false,
-    descr = "set lecture chapters by number to download. -c 1 2 3",
+    descr = "set lecture chapters by number. -c 1 2 3",
     validate = a => a.forall(_ > 0))
+  val chapters = opt[List[Int]](required = false,
+    descr = "set lecture chapters by period. -c 1 5 or -c 2. It will download 1,2,3,4,5" +
+      " chapters or in second case all chapters from number 2",
+    validate = a => a.forall(_ > 0) && (a.length == 2 || a.length == 1), short = 'v')
   val classname= trailArg[String](required = false, descr = "set Coursera class name")
   mutuallyExclusive(username, filename)
   mutuallyExclusive(password, filename)
@@ -117,11 +121,11 @@ class Coursera(course: String, username: String, password: String, directory: St
   private val pptx                          = optionsMap.getOrElse("pptx", false)
   private val update                        = optionsMap.getOrElse("update", false)
   private val LOG = Logger.getLogger("coursera")
-  def isTxt(filename: String)       = txt && filename.endsWith(".txt")
-  def isPdf(filename: String)       = pdf && filename.endsWith(".pdf")
-  def isSrt(filename: String)       = srt && filename.endsWith(".srt")
-  def isMp4(filename: String)       = mp4 && filename.endsWith(".mp4")
-  def isPptx(filename: String)      = pptx && filename.endsWith(".pptx")
+  def isTxt(filename: String)               = txt && filename.endsWith(".txt")
+  def isPdf(filename: String)               = pdf && filename.endsWith(".pdf")
+  def isSrt(filename: String)               = srt && filename.endsWith(".srt")
+  def isMp4(filename: String)               = mp4 && filename.endsWith(".mp4")
+  def isPptx(filename: String)              = pptx && filename.endsWith(".pptx")
 
   lazy val getLectureUrl: String = String.format(LectureUrl, course)
 
@@ -194,6 +198,7 @@ class Coursera(course: String, username: String, password: String, directory: St
   def getFilesList(chapters: Option[List[Int]]): List[(List[String], Int)] = {
     val files = CourseraParser.parsePage(getClassPage).zipWithIndex
     chapters match {
+      case Some(List(n)) => files.filter(x => x._2 + 1 >= n)
       case Some(list) => files.filter(x => list.contains(x._2 + 1))
       case None => files
     }
@@ -498,6 +503,7 @@ object Main {
     val className  = if (conf.classname.isEmpty) None else Some(conf.classname())
     val fileName   = if (conf.filename.isEmpty) None else Some(conf.filename())
     val chapters   = if (conf.chapter.isEmpty) None else Some(conf.chapter())
+    val periodChapters = if (conf.chapters.isEmpty) None else Some(conf.chapters())
     val directory  = if (conf.directory.isEmpty) new File(".").getCanonicalPath else conf.directory()
     val optionsMap = Map(
       "info" -> conf.info(),
@@ -509,6 +515,16 @@ object Main {
       "pptx" -> conf.pptx()
     )
 
+    def getChapterPeriod(chapters: Option[List[Int]]) = chapters match {
+      case ls @ Some(List(_)) => ls
+      case Some(f :: s :: Nil) => Some((f to s).toList)
+      case _ => None
+    }
+
+    def mergeChapters(chapters: Option[List[Int]], periodChapters: Option[List[Int]]) = {
+      Some((chapters.get union getChapterPeriod(periodChapters).get).toSet.toList.sorted)
+    }
+
     def getCredentials(conf: CourseraOptions): (Option[String], Option[String], Option[String]) = {
       if (conf.username.isEmpty || conf.password.isEmpty || className.isEmpty) {
         // we should read conf file
@@ -518,14 +534,21 @@ object Main {
       }
     }
 
+    val allChapters: Option[List[Int]] = {
+      if (chapters == None && periodChapters == None) None
+      else if (chapters != None && periodChapters == None) chapters
+      else if (chapters == None && periodChapters != None) getChapterPeriod(periodChapters)
+      else mergeChapters(chapters, periodChapters)
+    }
+
     getCredentials(conf) match {
       case (Some(username), Some(password), Some(classname)) => {
-        new Coursera(classname, username, password, directory, optionsMap)(chapters)
+        new Coursera(classname, username, password, directory, optionsMap)(allChapters)
       }
       case (Some(username), Some(password), None) => {
         className match {
           case Some(classname) => {
-            new Coursera(classname, username, password, directory, optionsMap)(chapters)
+            new Coursera(classname, username, password, directory, optionsMap)(allChapters)
           }
           case None => {
             LOG.info("Should be set classname parameter either in a configuration file or in a command line")

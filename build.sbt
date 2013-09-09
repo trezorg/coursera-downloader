@@ -1,4 +1,5 @@
 import AssemblyKeys._
+import scala.sys.process.Process
 
 name := "Coursera"
 
@@ -32,6 +33,18 @@ jarName in assembly := "coursera.jar"
 
 test in assembly := {}
 
+target in assembly := file("target/out")
+
 excludedJars in assembly <<= (fullClasspath in assembly) map { cp =>
   cp filter {_.data.getName == "scalatest_2.10-1.9.1.jar"}
 }
+
+TaskKey[Unit]("deploy") := {
+    val assemblyFile = "target/out/coursera.jar"
+    val linuxFile = "coursera"
+    val templateFile = "src/main/resources/template"
+    val command = "(cat %1$s; cat %2$s) > %3$s; chmod +x %3$s" format (templateFile, assemblyFile, linuxFile)
+    Process(Seq("sh", "-c", command)).!
+}
+
+TaskKey[Unit]("deploy") <<= TaskKey[Unit]("deploy").dependsOn(assembly)

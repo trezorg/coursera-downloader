@@ -10,6 +10,12 @@ Installation
     $ cd coursera-scala-dl
     $ sbt assembly
 
+It is also possible to make a self-starting Linux script by
+
+    $ sbt deploy
+
+It will create a executable file "coursera" in the project directory
+
 Usage
 -------
 
