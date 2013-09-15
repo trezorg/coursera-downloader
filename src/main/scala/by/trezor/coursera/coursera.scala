@@ -20,6 +20,8 @@ import org.streum.configrity._
 import org.fusesource.jansi.Ansi._
 
 
+class CourseraException(message: String) extends Exception(message)
+
 object CourseraOutput {
 
   def out(op: String => Unit)(text: String, color: Option[Color] = None): CourseraOutput.type = {
@@ -49,7 +51,7 @@ object CourseraParser {
 
   def parsePage(st: String): List[List[String]] = {
     CourseraOutput("Getting files list...")
-    (for (el: Element <- Jsoup.parse(st).select(RootElement).iterator().asScala) yield parseElement(el)).toList
+    Jsoup.parse(st).select(RootElement).iterator().asScala.map(el => parseElement(el)).toList
   }
 
   private def parseElement(el: Element): List[String] = {
@@ -99,9 +101,7 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
 
 class Coursera(course: String, username: String, password: String, directory: String, optionsMap: Map[String, Boolean]) {
 
-  private val SessionIdCookieName           = "sessionid"
-  private val SessionCookieName             = "session"
-  private val MaestroLoginCookieName        = "maestro_login"
+  private val AuthCookieName                = "CAUTH"
   private val MaestroLoginFlagName          = "maestro_login_flag"
   private val CsrfTokenCookieName           = "csrf_token"
   private val PasswordFieldName             = "password"
@@ -109,10 +109,10 @@ class Coursera(course: String, username: String, password: String, directory: St
   private val ConnectionTimeout             = 3600 * 1000
   private val OkResponseCode                = 200
   private val RedirectResponseCode          = 302
-  private val LectureUrl                    = "http://class.coursera.org/%s/lecture/index"
+  private val LectureUrl                    = "https://class.coursera.org/%s/lecture/index"
   private val loginUrl                      = "https://accounts.coursera.org/api/v1/login"
   private val ReferrerUrl                   = "https://accounts.coursera.org/signin"
-  private val ClassAuthUrl                  = "https://class.coursera.org/%s/auth/auth_redirector?type=login&subtype=normal&email=&visiting=%s"
+  private val ClassAuthUrl                  = "https://class.coursera.org/%s//auth/auth_redirector?type=login&subtype=normal"
   private val DefaultCodePage               = "UTF-8"
   private val txt                           = optionsMap.getOrElse("txt", false)
   private val srt                           = optionsMap.getOrElse("srt", false)
@@ -120,80 +120,76 @@ class Coursera(course: String, username: String, password: String, directory: St
   private val mp4                           = optionsMap.getOrElse("mp4", false)
   private val pptx                          = optionsMap.getOrElse("pptx", false)
   private val update                        = optionsMap.getOrElse("update", false)
-  private val LOG = Logger.getLogger("coursera")
+  private val LOG                           = Logger.getLogger("coursera")
+  private val cookiesClassNames             = List(AuthCookieName, MaestroLoginFlagName)
+  private val cookiesSessionNames           = List(AuthCookieName, CsrfTokenCookieName, MaestroLoginFlagName)
+  private val requestHeaders                = List(("Accept", "*/*"), ("User-Agent", "scalaj-http"))
+  private val courseraHttpOptions           = List(HttpOptions.connTimeout(ConnectionTimeout), HttpOptions.readTimeout(ConnectionTimeout))
+  private lazy val getLectureUrl            = String.format(LectureUrl, course)
+  private lazy val getClassAuthUrl          = String.format(ClassAuthUrl, course)
   def isTxt(filename: String)               = txt && filename.endsWith(".txt")
   def isPdf(filename: String)               = pdf && filename.endsWith(".pdf")
   def isSrt(filename: String)               = srt && filename.endsWith(".srt")
   def isMp4(filename: String)               = mp4 && filename.endsWith(".mp4")
   def isPptx(filename: String)              = pptx && filename.endsWith(".pptx")
 
-  lazy val getLectureUrl: String = String.format(LectureUrl, course)
-
-  val courseraHttpOptions: List[HttpOptions.HttpOption] =
-    List(HttpOptions.connTimeout(ConnectionTimeout), HttpOptions.readTimeout(ConnectionTimeout))
-
-  lazy val getClassAuthUrl: String = String.format(ClassAuthUrl, course, Http.urlEncode(getLectureUrl, DefaultCodePage))
-
-  val cookiesNames = List(SessionIdCookieName, MaestroLoginCookieName, MaestroLoginFlagName)
-
   def cookiesToMap(st: String): Map[String, String] = {
-    st.split("; ").map(_.split("=", 2)).foldLeft(Map[String, String]())((m, s) => m + (
+    st.split(";\\s+").map(_.split("=", 2)).foldLeft(Map[String, String]())((m, s) => m + (
       s match {
         case Array(a, b) => a -> b
         case _ => "" -> ""
-      }))
+      })
+    ).filterKeys(_ != "")
   }
 
   lazy val getCsrfToken: String = {
     Http(getLectureUrl).options(courseraHttpOptions).
-      asHeadersAndParse(Http.readString)._2.get("Set-Cookie") match {
+      asCodeHeaders._2.get("Set-Cookie") match {
       case Some(list: List[String]) => cookiesToMap(list.head) getOrElse(CsrfTokenCookieName, "")
       case _ => ""
     }
   }
 
   def prepareLoginHeaders(csrf: String): List[(String,String)] =
-    List(("Referer", ReferrerUrl), ("X-CSRFToken", csrf), ("Cookie", "csrftoken=" + csrf))
+    List(("Referer", ReferrerUrl), ("X-CSRFToken", csrf), ("Cookie", "csrftoken=" + csrf)) ::: requestHeaders
 
   def prepareLoginParams: List[(String, String)] =
     List((UsernameFieldName, username), (PasswordFieldName, password))
 
-  def prepareClassAuthHeaders: List[(String, String)] = {
-    val classAuthCookie = for (
-      map <- getAuthCookie.map(cookiesToMap);
-      (name, value) <- map
-      if cookiesNames.contains(name))
-    yield name + "=" + value
-    List(("Cookie", classAuthCookie mkString "; "))
+  def filterCookies(cookies: List[String], filter:List[String]): String = {
+    val cookiesMap = cookiesToMap(cookies mkString "; ") filterKeys filter.contains
+    cookiesMap.map { case (key, value) => "%s=%s" format(key, value) } mkString "; "
   }
+
+  def prepareClassAuthHeaders: List[(String, String)] =
+    List(("Cookie", filterCookies(getAuthCookie, cookiesClassNames))) ::: requestHeaders
 
   lazy val sessionHeaders: List[(String, String)] =
-    List(("Cookie", SessionCookieName + "=" + getSessionCookie))
+    List(("Cookie", filterCookies(getAuthCookie ::: getSessionCookie, cookiesSessionNames))) ::: requestHeaders
 
   lazy val getAuthCookie: List[String] = {
-    val res = Http.post(loginUrl).headers(prepareLoginHeaders(getCsrfToken)).
+    Http.post(loginUrl).headers(prepareLoginHeaders(getCsrfToken)).
       options(courseraHttpOptions).
       params(prepareLoginParams).
-      asHeadersAndParse(Http.readString)
-    res._2.get("Set-Cookie").head
-  }
-
-  def getSessionCookie: String = {
-    CourseraOutput("Authenticating...")
-    Http(getClassAuthUrl).headers(prepareClassAuthHeaders).
-      options(courseraHttpOptions).
-      asHeadersAndParse(Http.readString)._2.get("Set-Cookie") match {
-      case Some(list: List[String]) => {
-        for (
-          map <- list.map(cookiesToMap);
-          (name, value) <- map
-          if name == SessionCookieName
-        ) yield value}.mkString
-      case _ => ""
+      asCodeHeaders._2.get("Set-Cookie") match {
+        case Some(lst) => lst
+        case _ => Nil
     }
   }
 
-  def getClassPage: String = Http(getLectureUrl).headers(sessionHeaders).options(courseraHttpOptions).asString
+  def getSessionCookie: List[String] = {
+    CourseraOutput("Authenticating...")
+    val response = Http(getClassAuthUrl).headers(prepareClassAuthHeaders).
+      options(courseraHttpOptions).
+      asCodeHeaders
+    response._2.get("Set-Cookie") match {
+      case Some(x) => x
+      case _ => throw new CourseraException("Cannot login to coursera. Check email and password.")
+    }
+  }
+
+  def getClassPage: String =
+    Http(getLectureUrl).headers(sessionHeaders).options(courseraHttpOptions).asString
 
   def getFilesList(chapters: Option[List[Int]]): List[(List[String], Int)] = {
     val files = CourseraParser.parsePage(getClassPage).zipWithIndex
@@ -204,17 +200,13 @@ class Coursera(course: String, username: String, password: String, directory: St
     }
   }
 
-  def needDownloadFile(file: File, size: Long): Boolean = {
-    update || !file.exists() || size != -1 && file.length != size
-  }
+  def needDownloadFile(file: File, size: Long): Boolean = update || !file.exists() || size != -1 && file.length != size
 
   def downloadFile(file: File, url: String, session: String, size: Long): (Boolean, String) = {
     if (needDownloadFile(file, size)) {
       new Downloader(file.getCanonicalPath, url, session)()
       (true, file.getName)
-    } else {
-      (false, file.getName)
-    }
+    } else (false, file.getName)
   }
 
   def downloadChapters(files: Iterable[(String, List[(Int, String, String)])]) {
@@ -366,6 +358,7 @@ class Coursera(course: String, username: String, password: String, directory: St
         downloadChapters(files.values)
       }
     } catch {
+      case e: CourseraException => CourseraOutput.prn(e.getMessage, Some(Color.RED))
       case e: Exception => CourseraOutput("An error has occurred: %s" format e.getStackTraceString)
     } finally {
       terminalWaitActor ! Stop

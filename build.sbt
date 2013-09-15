@@ -45,6 +45,12 @@ TaskKey[Unit]("deploy") := {
     val templateFile = "src/main/resources/template"
     val command = "(cat %1$s; cat %2$s) > %3$s; chmod +x %3$s" format (templateFile, assemblyFile, linuxFile)
     Process(Seq("sh", "-c", command)).!
+    val homeBinDir = System.getProperty("user.home") + "/bin"
+    val fhomeBinDir = new File(homeBinDir)
+    if (fhomeBinDir.exists() && fhomeBinDir.isDirectory()) {
+        val command = "(cat %1$s; cat %2$s) > %3$s; chmod +x %3$s" format (templateFile, assemblyFile, "%s/%s".format(homeBinDir, linuxFile))
+        Process(Seq("sh", "-c", command)).!
+    }
 }
 
 TaskKey[Unit]("deploy") <<= TaskKey[Unit]("deploy").dependsOn(assembly)
