@@ -338,8 +338,8 @@ class Coursera(
       index: Int,
       chapterDirectory: String,
       chapter: List[(Int, String, String)]) {
-    CourseraOutput.prn("#%s: " format index + 1, Some(Color.BLUE))
-      (chapterDirectory, Some(Color.RED))
+    CourseraOutput.prn("#%s: " format index + 1, Some(Color.BLUE))(
+      chapterDirectory, Some(Color.RED))
     println()
     val dir = new File(directory, chapterDirectory).getCanonicalPath
     chapter.zipWithIndex.foreach {
@@ -363,8 +363,17 @@ class Coursera(
     }
   }
 
-  def parseContentDisposition(value: String): String =
-    value.split("=").toList.last.replaceAll("\"*$|^\"*", "")
+  def parseContentDisposition(value: String): String = {
+    val mp = value.split(";\\s+").map {
+      x => x.split("=", 2) match {
+          case Array(z) => "" -> ""
+          case Array(z, y) => z -> y
+        }
+    }.toMap filterKeys { _ != "" }
+    val filename = mp.getOrElse("filename", "").
+      replaceAll("\"*$|^\"*", "").replaceAll("\'", "")
+    java.net.URLDecoder.decode(filename, DefaultCodePage)
+  }
 
   def parseUrlFilename(url: String): String = url.split("/").toList.last
 

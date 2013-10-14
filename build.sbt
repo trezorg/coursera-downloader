@@ -1,9 +1,10 @@
 import AssemblyKeys._
+import Project._
 import scala.sys.process.Process
 
 name := "Coursera"
 
-version := "0.0.2"
+version := "0.0.3"
 
 scalaVersion := "2.10.2"
 
@@ -39,18 +40,6 @@ excludedJars in assembly <<= (fullClasspath in assembly) map { cp =>
   cp filter {_.data.getName == "scalatest_2.10-1.9.1.jar"}
 }
 
-TaskKey[Unit]("deploy") := {
-    val assemblyFile = "target/out/coursera.jar"
-    val linuxFile = "coursera"
-    val templateFile = "src/main/resources/template"
-    val command = "(cat %1$s; cat %2$s) > %3$s; chmod +x %3$s" format (templateFile, assemblyFile, linuxFile)
-    Process(Seq("sh", "-c", command)).!
-    val homeBinDir = System.getProperty("user.home") + "/bin"
-    val fhomeBinDir = new File(homeBinDir)
-    if (fhomeBinDir.exists() && fhomeBinDir.isDirectory()) {
-        val command = "(cat %1$s; cat %2$s) > %3$s; chmod +x %3$s" format (templateFile, assemblyFile, "%s/%s".format(homeBinDir, linuxFile))
-        Process(Seq("sh", "-c", command)).!
-    }
-}
+copyToBin in deploy := true
 
-TaskKey[Unit]("deploy") <<= TaskKey[Unit]("deploy").dependsOn(assembly)
+linuxFile := "coursera"
