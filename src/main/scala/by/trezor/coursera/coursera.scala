@@ -9,7 +9,6 @@ import scala.concurrent.{future, Future, Await}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
-import scala.language.reflectiveCalls
 import scala.actors.Actor
 import scala.actors.Actor._
 import org.rogach.scallop._
@@ -77,6 +76,8 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
            |This program helps to download coursera class lectures
            |Options:
            |""".stripMargin)
+  version("0.0.3 (c) 2013 Igor Nemilentsev")
+
   val username = opt[String](required = false, descr = "set username/email")
   val password = opt[String](required = false, descr = "set password")
   val filename = opt[String](required = false, descr = "set configuration file")
@@ -101,7 +102,7 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
     descr = "set lecture chapters by number. -c 1 2 3",
     validate = a => a.forall(_ > 0))
   val chapters = opt[List[Int]](required = false,
-    descr = "set lecture chapters by period. -c 1 5 or -c 2." +
+    descr = "set lecture chapters by period. -v 1 5 or -v 2." +
       " It will download 1,2,3,4,5 chapters or in second" +
       " case all chapters from number 2",
     validate = a => a.forall(_ > 0) && (a.length == 2 || a.length == 1),
@@ -141,6 +142,9 @@ object Coursera {
   private val courseraHttpOptions   = List(
     HttpOptions.connTimeout(ConnectionTimeout),
     HttpOptions.readTimeout(ConnectionTimeout))
+  private val supportedExt = List("txt", "pdf", "srt", "mp4", "pptx")
+  private val fileExtRegexpString =
+    ".+\\.(%s)$".format(supportedExt.mkString("|"))
 
   def getChapterPeriod(chapters: Option[List[Int]]) = chapters match {
     case ls @ Some(List(_)) => ls
@@ -281,9 +285,9 @@ class Coursera(
   def getFilesList(chapters: Option[List[Int]]): List[(List[String], Int)] = {
     val files = CourseraParser.parsePage(getClassPage).zipWithIndex
     chapters match {
-      case Some(List(n)) => files.filter(x => x._2 + 1 >= n)
-      case Some(list) => files.filter(x => list.contains(x._2 + 1))
-      case None => files
+      case Some(List(n)) => files.filter(x => x._2 + 1 >= n).toList
+      case Some(list) => files.filter(x => list.contains(x._2 + 1)).toList
+      case None => files.toList
     }
   }
 
@@ -400,7 +404,7 @@ class Coursera(
           case Some(list: List[String]) => list :+ value
           case None => List(value)
         }
-        params += (key -> values)
+        params(key) = values.toList
         values
       }
     }
@@ -461,9 +465,18 @@ class Coursera(
 
   val notSetAny =  List(txt, pdf, mp4, srt, pptx).forall(x => !x)
 
+  def isValidFileExt(filename: String) = filename matches fileExtRegexpString
+
   def filterFile(filename: String): Boolean = {
-    notSetAny || isTxt(filename) || isMp4(filename) || isPdf(filename) ||
-    isSrt(filename) || isPptx(filename)
+    isValidFileExt(filename) &&
+      (
+        notSetAny ||
+        isTxt(filename) ||
+        isMp4(filename) ||
+        isPdf(filename) ||
+        isSrt(filename) ||
+        isPptx(filename)
+      )
   }
 
   def getLecturesData(files: List[(List[String], Int)]):

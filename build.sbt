@@ -6,9 +6,9 @@ name := "Coursera"
 
 version := "0.0.3"
 
-scalaVersion := "2.10.2"
+scalaVersion := "2.10.3"
 
-crossScalaVersions := Seq("2.9.2", "2.10.2")
+crossScalaVersions := Seq("2.10.2", "2.10.3")
 
 scalacOptions ++= Seq("-deprecation", "-feature")
 
