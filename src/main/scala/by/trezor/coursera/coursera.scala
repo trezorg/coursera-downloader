@@ -565,7 +565,11 @@ object terminalWaitActor extends Actor {
 
 object CourseraConfig {
 
+  import org.streum.configrity.io.StandardFormat.ParserException
+
   private val defaultConfigFile = "coursera.conf"
+  private val LOG = Logger.getLogger("coursera")
+
 
   def checkFileExists(file: File): Boolean = file.exists && file.isFile
 
@@ -593,10 +597,22 @@ object CourseraConfig {
 
   def parseConfig(filename: String):
       (Option[String], Option[String], Option[String]) = {
-    val config = Configuration.load(filename)
-    (config.get[String]("username"),
-      config.get[String]("password"),
-      config.get[String]("classname"))
+    try {
+      val config = Configuration.load(filename)
+      (config.get[String]("username"),
+        config.get[String]("password"),
+        config.get[String]("classname"))
+    } catch {
+      case e: ParserException => {
+        LOG.severe("Cannot parse file: %s" format filename)
+        (None, None, None)
+      }
+      case e: Exception => {
+        LOG.severe("Something went wrong during processing file: %s => %s"
+          format(filename, e))
+        (None, None, None)
+      }
+    }
   }
 
 }
