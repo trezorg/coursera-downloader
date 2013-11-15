@@ -12,7 +12,7 @@ crossScalaVersions := Seq("2.10.2", "2.10.3")
 
 scalacOptions ++= Seq("-deprecation", "-feature")
 
-libraryDependencies += "org.scalaj" %% "scalaj-http" % "0.3.9" withSources() excludeAll(
+libraryDependencies += "org.scalaj" %% "scalaj-http" % "0.3.11" withSources() excludeAll(
     ExclusionRule(organization = "junit")
 )
 

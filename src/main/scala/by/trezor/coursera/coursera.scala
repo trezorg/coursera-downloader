@@ -4,13 +4,14 @@ import java.io.{FileOutputStream, BufferedInputStream, BufferedOutputStream, Fil
 import java.util.logging._
 import java.net.{HttpURLConnection, URL, URLDecoder}
 import scala.collection.JavaConverters.asScalaIteratorConverter
-import scalaj.http._
+import scala.language.reflectiveCalls
 import scala.concurrent.{future, Future, Await}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 import scala.actors.Actor
 import scala.actors.Actor._
+import scalaj.http._
 import org.rogach.scallop._
 import org.fusesource.jansi.AnsiConsole
 import org.jsoup.Jsoup
@@ -100,7 +101,7 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
     validate = a => new File(a).isDirectory)
   val chapter = opt[List[Int]](required = false,
     descr = "set lecture chapters by number. -c 1 2 3",
-    validate = a => a.forall(_ > 0))
+    validate = a => a.forall(_ > 0), short = 'c')
   val chapters = opt[List[Int]](required = false,
     descr = "set lecture chapters by period. -v 1 5 or -v 2." +
       " It will download 1,2,3,4,5 chapters or in second" +
@@ -513,6 +514,7 @@ class Coursera(
 }
 
 case class Count(count: Int)
+case class Process(size: Long)
 case class Message(filename: String, state: Boolean)
 case object Stop
 case object Progress
@@ -521,18 +523,25 @@ object terminalWaitActor extends Actor {
 
   var count = 0
   var pos = 0
+  var clearCounter = 0
+  var speedPerWheel = 10
   var filesDone = 0
+  var size: Long = 0
+  var time: Long = 0
   val positions = Array("-", "\\", "|", "/")
-  val timeToSleep = 200
+  val timeToSleep = 300
 
-  def showProgress() {
+  def showProgress(timeDiff: Option[Long]) {
     pos = (pos + 1)  % 4
-    val message =
-      if (count > 0) {
-        val message = "[%s] done: [%s/%s]".
-          format(positions(pos), filesDone, count)
-        "%s%s" format(message, "\b" * message.length)
-      } else "[%s]%s".format(positions(pos), "\b" * 3)
+    clearCounter += 1
+    val currentSize = if (timeDiff.isDefined) " [%.02fKB/s]" format
+      (size * 1000 / 1024) / timeDiff.get.toFloat else ""
+    val message = {
+      val text = if (count > 0)
+        "[%s]%s done: [%s/%s]".format(positions(pos), currentSize, filesDone, count)
+      else "[%s]".format(positions(pos))
+      "%s%s" format(text, "\b" * text.length)
+    }
     CourseraOutput.prn(message)
     actor {
       Thread.sleep(timeToSleep)
@@ -541,11 +550,21 @@ object terminalWaitActor extends Actor {
   }
 
   def act() {
-    showProgress()
+    showProgress(None)
     loop {
       react {
+        case Process(sz) =>
+          if (time == 0) time = System.currentTimeMillis
+          size = size + sz
         case Progress =>
-          showProgress()
+          val curTime = System.currentTimeMillis
+          val diff = curTime - time
+          showProgress(Some(diff))
+          if ((clearCounter % speedPerWheel) == 0) {
+            time = curTime
+            size = 0
+            clearCounter = 0
+          }
         case Count(cnt: Int) =>
           count = cnt
         case Message(filename: String, true) =>
@@ -622,39 +641,42 @@ class Downloader(path: String, location: String, session: String) {
   private val Buffer = 1024 * 5
   private val LOG = Logger.getLogger("coursera")
 
-  def download() {
-    var out: Option[BufferedOutputStream] = None
-    var in: Option[BufferedInputStream] = None
+  def using2[T <: { def close() }, A <: { def close() }]
+      (in: T, out: A, f: => (Throwable) => Unit)
+      (block: => (T, A) => Unit) {
     try {
-      val url = new URL(location)
-      val connection = url.openConnection().asInstanceOf[HttpURLConnection]
-      connection.setRequestMethod("GET")
-      connection.addRequestProperty("Cookie", session)
-      in = Some(new BufferedInputStream(connection.getInputStream))
-      out = Some(new BufferedOutputStream(new FileOutputStream(path)))
+      block(in, out)
+    } catch {
+      case ex: Throwable => f(ex)
+    } finally {
+      in.close()
+      out.close()
+    }
+  }
+  def getConnectionStream = {
+    val url = new URL(location)
+    val connection = url.openConnection().asInstanceOf[HttpURLConnection]
+    connection.setRequestMethod("GET")
+    connection.addRequestProperty("Cookie", session)
+    new BufferedInputStream(connection.getInputStream)
+  }
+  def download() {
+    using2(
+        getConnectionStream,
+        new BufferedOutputStream(new FileOutputStream(path)),
+        e => LOG.log(Level.SEVERE, "Cannot download file: " + path, e)
+      ) { (in, out) =>
       var count = 0
       val buffer: Array[Byte] = new Array[Byte](Buffer)
-      while ({ count = in.get.read(buffer, 0, Buffer); count != -1})
-        out.get.write(buffer, 0, count)
-    } catch {
-      case e:Exception =>
-        LOG.log(Level.SEVERE, "Cannot download file: " + path, e)
-    } finally {
-      in match {
-        case Some(value) => value.close()
-        case _ =>
-      }
-      out match {
-        case Some(value) => value.close()
-        case _ =>
+      while ({ count = in.read(buffer, 0, Buffer); count != -1}) {
+        out.write(buffer, 0, count)
+        terminalWaitActor ! Process(count)
       }
     }
   }
-
   def apply() {
     download()
   }
-
 }
 
 object Main {
