@@ -28,10 +28,9 @@ object CourseraOutput {
       text: String,
       color: Option[Color] = None): CourseraOutput.type = {
     color match {
-      case Some(cl) => {
+      case Some(cl) =>
         AnsiConsole.systemInstall()
         op(ansi().fg(cl).a(text).reset().toString)
-      }
       case _ => op(text)
     }
     this
@@ -46,10 +45,11 @@ object CourseraOutput {
 
 object CourseraParser {
 
+  import Coursera._
+
   private val RootElement = ".course-item-list-section-list"
   private val HeaderSubElement = "h3"
   private val ChapterElement = ".course-lecture-item-resource"
-  private val Charset = "UTF-8"
 
   def parsePage(st: String): List[List[String]] = {
     CourseraOutput("Getting files list...")
@@ -65,7 +65,7 @@ object CourseraParser {
       for (
         links: Element <- el.select(ChapterElement).iterator().asScala;
         link: Element <- links.select("a").iterator().asScala
-      ) yield Http.urlDecode(link.attr("href"), Charset)
+      ) yield Http.urlDecode(link.attr("href"), DefaultCodePage)
     ).toList
   }
 
@@ -96,6 +96,8 @@ class CourseraOptions(arguments: Seq[String]) extends ScallopConf(arguments) {
     descr = "get only pptx files", default = Some(false))
   val mp4 = opt[Boolean](required = false,
     descr = "get only mp4 files", default = Some(false))
+  val zip = opt[Boolean](required = false,
+    descr = "get only zip files", default = Some(false))
   val directory = opt[String](required = false,
     descr = "set directory to save files. default is a current directory.",
     validate = a => new File(a).isDirectory)
@@ -134,7 +136,6 @@ object Coursera {
   private val ClassAuthUrl          =
     "https://class.coursera.org/%s/auth/auth_redirector?" +
       "type=login&subtype=normal"
-  private val DefaultCodePage       = "UTF-8"
   private val cookiesClassNames     = List(AuthCookieName, MaestroLoginFlagName)
   private val cookiesSessionNames   = List(
     AuthCookieName, CsrfTokenCookieName, MaestroLoginFlagName)
@@ -143,9 +144,10 @@ object Coursera {
   private val courseraHttpOptions   = List(
     HttpOptions.connTimeout(ConnectionTimeout),
     HttpOptions.readTimeout(ConnectionTimeout))
-  private val supportedExt = List("txt", "pdf", "srt", "mp4", "pptx")
+  private val supportedExt = List("txt", "pdf", "srt", "mp4", "pptx", "zip")
   private val fileExtRegexpString =
     ".+\\.(%s)$".format(supportedExt.mkString("|"))
+  val DefaultCodePage       = "UTF-8"
 
   def getChapterPeriod(chapters: Option[List[Int]]) = chapters match {
     case ls @ Some(List(_)) => ls
@@ -209,6 +211,7 @@ class Coursera(
   private val pdf                   = optionsMap.getOrElse("pdf", false)
   private val mp4                   = optionsMap.getOrElse("mp4", false)
   private val pptx                  = optionsMap.getOrElse("pptx", false)
+  private val zip                   = optionsMap.getOrElse("zip", false)
   private val update                = optionsMap.getOrElse("update", false)
   private val LOG                   = Logger.getLogger("coursera")
   private lazy val getLectureUrl    = String.format(LectureUrl, course)
@@ -218,6 +221,7 @@ class Coursera(
   def isSrt(filename: String)       = srt && filename.endsWith(".srt")
   def isMp4(filename: String)       = mp4 && filename.endsWith(".mp4")
   def isPptx(filename: String)      = pptx && filename.endsWith(".pptx")
+  def isZip(filename: String)       = zip && filename.endsWith(".zip")
 
   lazy val getCsrfToken: String = {
     Http(getLectureUrl).options(courseraHttpOptions).
@@ -331,11 +335,11 @@ class Coursera(
           case Success((false, filename)) =>
             terminalWaitActor ! Message(filename, state = false)
           case Failure(t) =>
-            CourseraOutput("An error has occurred: " + t.getStackTraceString)
+            CourseraOutput("An error has occurred: %s => %s" format(t.getMessage, t.getStackTraceString))
         }
       })
       val futures: Future[List[(Boolean, String)]] = Future.sequence(tasks)
-      Await.result(futures, 120.minutes)
+      Await.result(futures, Duration.Inf)
     }
   }
 
@@ -348,7 +352,7 @@ class Coursera(
     println()
     val dir = new File(directory, chapterDirectory).getCanonicalPath
     chapter.zipWithIndex.foreach {
-      case ((size, name, url), i) => {
+      case ((size, name, url), i) =>
         val file = new File(dir, name)
         if (!file.exists()) {
           CourseraOutput("%s: %s" format(i, name), Some(Color.GREEN))
@@ -357,7 +361,6 @@ class Coursera(
         } else {
           CourseraOutput("%s: %s" format(i, name), Some(Color.CYAN))
         }
-      }
     }
     println()
   }
@@ -377,7 +380,7 @@ class Coursera(
     }.toMap filterKeys { _ != "" }
     val filename = mp.getOrElse("filename", "").
       replaceAll("\"*$|^\"*", "").replaceAll("\'", "")
-    java.net.URLDecoder.decode(filename, DefaultCodePage)
+    URLDecoder.decode(filename, DefaultCodePage)
   }
 
   def parseUrlFilename(url: String): String = url.split("/").toList.last
@@ -412,6 +415,15 @@ class Coursera(
     params.toMap
   }
 
+  def getFileNameFromUrl(url: String) = {
+    val slashIndex = url.lastIndexOf("/")
+    val qIndex = url.lastIndexOf("?")
+    if (qIndex > slashIndex) {
+      //if has parameters
+      url.substring(slashIndex + 1, qIndex)
+    } else url.substring(slashIndex + 1)
+  }
+
   def getFileData(url: String): Option[(Int, String, String)] = {
     // returns content-length, filename and url
     val response = Http(url).
@@ -419,7 +431,7 @@ class Coursera(
       options(courseraHttpOptions ::: List(HttpOptions.method("HEAD"))).
       option(_.setInstanceFollowRedirects(false)).asCodeHeaders
     response match {
-      case (OkResponseCode, headers) => {
+      case (OkResponseCode, headers) =>
         Some((
           headers.getOrElse("Content-Length", List("-1"))(0).toInt,
           getContentDisposition(headers) match {
@@ -428,8 +440,7 @@ class Coursera(
           },
           url
         ))
-      }
-      case (RedirectResponseCode, headers) => {
+      case (RedirectResponseCode, headers) =>
         val location = headers.get("Location").get(0)
         val res = Http(location).headers(sessionHeaders).
           options(courseraHttpOptions).asCodeHeaders
@@ -442,13 +453,15 @@ class Coursera(
           },
           location
         ))
-      }
-      case (code, headers) => {
+      case (code, headers) =>
         LOG.log(Level.SEVERE,
           "Cannot get file data for url: %s . Response code: %s"
             format(url, code))
-        None
-      }
+        Some((
+          -1,
+          URLDecoder.decode(getFileNameFromUrl(url), DefaultCodePage),
+          url
+        ))
     }
   }
 
@@ -461,10 +474,10 @@ class Coursera(
       files.map { url => future { getFileData(url) }}
     val futures: Future[List[Option[(Int, String, String)]]] =
       Future.sequence(tasks)
-    Await.result(futures, 60.minutes).toList.flatten
+    Await.result(futures, Duration.Inf).toList.flatten
   }
 
-  val notSetAny =  List(txt, pdf, mp4, srt, pptx).forall(x => !x)
+  val notSetAny =  List(txt, pdf, mp4, srt, pptx, zip).forall(x => !x)
 
   def isValidFileExt(filename: String) = filename matches fileExtRegexpString
 
@@ -476,7 +489,8 @@ class Coursera(
         isMp4(filename) ||
         isPdf(filename) ||
         isSrt(filename) ||
-        isPptx(filename)
+        isPptx(filename) ||
+        isZip(filename)
       )
   }
 
@@ -484,8 +498,7 @@ class Coursera(
       Map[Int, (String, List[(Int, String, String)])] = {
     files.map {
       case ((title :: urls), number) =>
-        (number, (title, getLectureData(urls, title).
-          filter(x => filterFile(x._2))))
+        (number, (title, getLectureData(urls, title).filter(x => filterFile(x._2))))
       case (_, number) => (number, ("", List()))
     }.toMap
   }
@@ -505,7 +518,7 @@ class Coursera(
       case e: CourseraException =>
         CourseraOutput.prn(e.getMessage, Some(Color.RED))
       case e: Exception =>
-        CourseraOutput("An error has occurred: %s" format e.getStackTraceString)
+        CourseraOutput("An error has occurred: %s => %s" format(e.getMessage, e.getStackTraceString))
     } finally {
       terminalWaitActor ! Stop
     }
@@ -622,15 +635,13 @@ object CourseraConfig {
         config.get[String]("password"),
         config.get[String]("classname"))
     } catch {
-      case e: ParserException => {
+      case e: ParserException =>
         LOG.severe("Cannot parse file: %s" format filename)
         (None, None, None)
-      }
-      case e: Exception => {
+      case e: Exception =>
         LOG.severe("Something went wrong during processing file: %s => %s"
           format(filename, e))
         (None, None, None)
-      }
     }
   }
 
@@ -654,7 +665,7 @@ class Downloader(path: String, location: String, session: String) {
     }
   }
   def getConnectionStream = {
-    val url = new URL(location)
+    val url = new URL(location.replaceAll(" ", "%20"))
     val connection = url.openConnection().asInstanceOf[HttpURLConnection]
     connection.setRequestMethod("GET")
     connection.addRequestProperty("Cookie", session)
@@ -664,7 +675,7 @@ class Downloader(path: String, location: String, session: String) {
     using2(
         getConnectionStream,
         new BufferedOutputStream(new FileOutputStream(path)),
-        e => LOG.log(Level.SEVERE, "Cannot download file: " + path, e)
+        e => LOG.log(Level.SEVERE, "Cannot download file: %s" format path, e)
       ) { (in, out) =>
       var count = 0
       val buffer: Array[Byte] = new Array[Byte](Buffer)
@@ -704,7 +715,8 @@ object Main {
       "txt" -> conf.txt(),
       "srt" -> conf.srt(),
       "mp4" -> conf.mp4(),
-      "pptx" -> conf.pptx()
+      "pptx" -> conf.pptx(),
+      "zip" -> conf.zip()
     )
 
     getCredentials(conf, fileName, className) match {
@@ -715,7 +727,7 @@ object Main {
           password,
           directory,
           optionsMap)(getAllChapters(chapters, periodChapters))
-      case (Some(username), Some(password), None) => {
+      case (Some(username), Some(password), None) =>
         className match {
           case Some(classname) =>
             new Coursera(
@@ -724,20 +736,17 @@ object Main {
               password,
               directory,
               optionsMap)(getAllChapters(chapters, periodChapters))
-          case _ => {
+          case _ =>
             LOG.info("Should be set classname parameter either" +
               " in a configuration file or in a command line")
             conf.printHelp()
             sys.exit(1)
-          }
-        }
       }
-      case _ => {
+      case _ =>
         LOG.info("Should be set either a configuration" +
           " filename or an username and password")
         conf.printHelp()
         sys.exit(1)
-      }
     }
   }
 }
