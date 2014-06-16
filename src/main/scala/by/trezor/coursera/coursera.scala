@@ -143,7 +143,8 @@ object Coursera {
     ("Accept", "*/*"), ("User-Agent", "scalaj-http"))
   private val courseraHttpOptions   = List(
     HttpOptions.connTimeout(ConnectionTimeout),
-    HttpOptions.readTimeout(ConnectionTimeout))
+    HttpOptions.readTimeout(ConnectionTimeout),
+    HttpOptions.allowUnsafeSSL)
   private val supportedExt = List("txt", "pdf", "srt", "mp4", "pptx", "zip")
   private val fileExtRegexpString =
     ".+\\.(%s)$".format(supportedExt.mkString("|"))
@@ -184,14 +185,9 @@ object Coursera {
   }
 
   def cookiesToMap(st: String): Map[String, String] = {
-    st.split(";\\s+").map(_.split("=", 2)).foldLeft(Map[String, String]()) {
-      (m, s) => { m + (
-        s match {
-          case Array(a, b) => a -> b
-          case _ => "" -> ""
-        })
-      }.filterKeys(_ != "")
-    }
+    st.split(";\\s+").map(_.split("=", 2)).collect {
+      case Array(a, b) => a -> b
+    }.toMap
   }
 
 }
@@ -372,12 +368,9 @@ class Coursera(
   }
 
   def parseContentDisposition(value: String): String = {
-    val mp = value.split(";\\s+").map {
-      x => x.split("=", 2) match {
-          case Array(z) => "" -> ""
-          case Array(z, y) => z -> y
-        }
-    }.toMap filterKeys { _ != "" }
+    val mp = value.split(";\\s+").map(x => x.split("=", 2)).collect {
+      case Array(z, y) => z -> y
+    }.toMap
     val filename = mp.getOrElse("filename", "").
       replaceAll("\"*$|^\"*", "").replaceAll("\'", "")
     URLDecoder.decode(filename, DefaultCodePage)
@@ -424,6 +417,12 @@ class Coursera(
     } else url.substring(slashIndex + 1)
   }
 
+  def getContentDispositionFromLocation(url: String) =
+    parseUriParameters(url).get("response-content-disposition") match {
+      case Some(List(value)) => parseContentDisposition(value)
+      case _ => getFileNameFromUrl(url)
+    }
+
   def getFileData(url: String): Option[(Int, String, String)] = {
     // returns content-length, filename and url
     val response = Http(url).
@@ -442,17 +441,26 @@ class Coursera(
         ))
       case (RedirectResponseCode, headers) =>
         val location = headers.get("Location").get(0)
-        val res = Http(location).headers(sessionHeaders).
+        val (code, resHeaders) = Http(location).headers(sessionHeaders).
           options(courseraHttpOptions).asCodeHeaders
-        Some((
-          res._2.getOrElse("Content-Length", List("-1"))(0).toInt,
-          getContentDisposition(headers) match {
+        if (code >= 300) {
+          LOG.log(Level.SEVERE,
+            s"Cannot get file data for url: $location . Response code: $code")
+          None
+        } else {
+          val contentDisposition = getContentDisposition(headers)
+          val contentLength =
+            resHeaders.getOrElse("Content-Length", List("-1"))(0).toInt
+          val filename = contentDisposition match {
             case Some(value) => value
-            case _ => parseContentDisposition(parseUriParameters(location).
-              get("response-content-disposition").get(0))
-          },
-          location
-        ))
+            case _ => getContentDispositionFromLocation(location)
+          }
+          if (filename.isEmpty) {
+            LOG.log(Level.WARNING, s"Cannot get file name from url: $location")
+            None
+          }
+          else Some((contentLength, filename, location))
+        }
       case (code, headers) =>
         LOG.log(Level.SEVERE,
           "Cannot get file data for url: %s . Response code: %s"
@@ -738,7 +746,7 @@ object Main {
               optionsMap)(getAllChapters(chapters, periodChapters))
           case _ =>
             LOG.info("Should be set classname parameter either" +
-              " in a configuration file or in a command line")
+              " in a configuration file or in the command line")
             conf.printHelp()
             sys.exit(1)
       }
