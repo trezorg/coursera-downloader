@@ -20,6 +20,12 @@ import org.streum.configrity._
 import org.fusesource.jansi.Ansi._
 
 
+case class Count(count: Int)
+case class Process(size: Long)
+case class Message(filename: String, state: Boolean)
+case object Stop
+case object Progress
+
 class CourseraException(message: String) extends Exception(message)
 
 object CourseraOutput {
@@ -141,9 +147,10 @@ object Coursera {
     AuthCookieName, CsrfTokenCookieName, MaestroLoginFlagName)
   private val requestHeaders        = List(
     ("Accept", "*/*"), ("User-Agent", "scalaj-http"))
-  private val courseraHttpOptions   = List(
+  private val courSeraHttpOptions   = List(
     HttpOptions.connTimeout(ConnectionTimeout),
-    HttpOptions.readTimeout(ConnectionTimeout))
+    HttpOptions.readTimeout(ConnectionTimeout),
+    HttpOptions.allowUnsafeSSL)
   private val supportedExt = List("txt", "pdf", "srt", "mp4", "pptx", "zip")
   private val fileExtRegexpString =
     ".+\\.(%s)$".format(supportedExt.mkString("|"))
@@ -184,14 +191,9 @@ object Coursera {
   }
 
   def cookiesToMap(st: String): Map[String, String] = {
-    st.split(";\\s+").map(_.split("=", 2)).foldLeft(Map[String, String]()) {
-      (m, s) => { m + (
-        s match {
-          case Array(a, b) => a -> b
-          case _ => "" -> ""
-        })
-      }.filterKeys(_ != "")
-    }
+    st.split(";\\s+").map(_.split("=", 2)).collect {
+      case Array(a, b) => a -> b
+    }.toMap
   }
 
 }
@@ -224,7 +226,7 @@ class Coursera(
   def isZip(filename: String)       = zip && filename.endsWith(".zip")
 
   lazy val getCsrfToken: String = {
-    Http(getLectureUrl).options(courseraHttpOptions).
+    Http(getLectureUrl).options(courSeraHttpOptions).
       asCodeHeaders._2.get("Set-Cookie") match {
       case Some(list: List[String]) => cookiesToMap(list.head).
         getOrElse(CsrfTokenCookieName, "")
@@ -263,7 +265,7 @@ class Coursera(
 
   lazy val getAuthCookie: List[String] = {
     Http.post(loginUrl).headers(prepareLoginHeaders(getCsrfToken)).
-      options(courseraHttpOptions).
+      options(courSeraHttpOptions).
       params(prepareLoginParams).
       asCodeHeaders._2.get("Set-Cookie") match {
         case Some(lst) => lst
@@ -274,7 +276,7 @@ class Coursera(
   def getSessionCookie: List[String] = {
     CourseraOutput("Authenticating...")
     val response = Http(getClassAuthUrl).headers(prepareClassAuthHeaders).
-      options(courseraHttpOptions).
+      options(courSeraHttpOptions).
       asCodeHeaders
     response._2.get("Set-Cookie") match {
       case Some(x) => x
@@ -285,7 +287,7 @@ class Coursera(
 
   def getClassPage: String =
     Http(getLectureUrl).headers(sessionHeaders).
-      options(courseraHttpOptions).asString
+      options(courSeraHttpOptions).asString
 
   def getFilesList(chapters: Option[List[Int]]): List[(List[String], Int)] = {
     val files = CourseraParser.parsePage(getClassPage).zipWithIndex
@@ -372,12 +374,9 @@ class Coursera(
   }
 
   def parseContentDisposition(value: String): String = {
-    val mp = value.split(";\\s+").map {
-      x => x.split("=", 2) match {
-          case Array(z) => "" -> ""
-          case Array(z, y) => z -> y
-        }
-    }.toMap filterKeys { _ != "" }
+    val mp = value.split(";\\s+").map(x => x.split("=", 2)).collect {
+      case Array(z, y) => z -> y
+    }.toMap
     val filename = mp.getOrElse("filename", "").
       replaceAll("\"*$|^\"*", "").replaceAll("\'", "")
     URLDecoder.decode(filename, DefaultCodePage)
@@ -424,11 +423,17 @@ class Coursera(
     } else url.substring(slashIndex + 1)
   }
 
+  def getContentDispositionFromLocation(url: String) =
+    parseUriParameters(url).get("response-content-disposition") match {
+      case Some(List(value)) => parseContentDisposition(value)
+      case _ => getFileNameFromUrl(url)
+    }
+
   def getFileData(url: String): Option[(Int, String, String)] = {
     // returns content-length, filename and url
     val response = Http(url).
       headers(sessionHeaders).
-      options(courseraHttpOptions ::: List(HttpOptions.method("HEAD"))).
+      options(courSeraHttpOptions ::: List(HttpOptions.method("HEAD"))).
       option(_.setInstanceFollowRedirects(false)).asCodeHeaders
     response match {
       case (OkResponseCode, headers) =>
@@ -442,17 +447,26 @@ class Coursera(
         ))
       case (RedirectResponseCode, headers) =>
         val location = headers.get("Location").get(0)
-        val res = Http(location).headers(sessionHeaders).
-          options(courseraHttpOptions).asCodeHeaders
-        Some((
-          res._2.getOrElse("Content-Length", List("-1"))(0).toInt,
-          getContentDisposition(headers) match {
+        val (code, resHeaders) = Http(location).headers(sessionHeaders).
+          options(courSeraHttpOptions).asCodeHeaders
+        if (code >= 300) {
+          LOG.log(Level.SEVERE,
+            s"Cannot get file data for url: $location . Response code: $code")
+          None
+        } else {
+          val contentDisposition = getContentDisposition(headers)
+          val contentLength =
+            resHeaders.getOrElse("Content-Length", List("-1"))(0).toInt
+          val filename = contentDisposition match {
             case Some(value) => value
-            case _ => parseContentDisposition(parseUriParameters(location).
-              get("response-content-disposition").get(0))
-          },
-          location
-        ))
+            case _ => getContentDispositionFromLocation(location)
+          }
+          if (filename.isEmpty) {
+            LOG.log(Level.WARNING, s"Cannot get file name from url: $location")
+            None
+          }
+          else Some((contentLength, filename, location))
+        }
       case (code, headers) =>
         LOG.log(Level.SEVERE,
           "Cannot get file data for url: %s . Response code: %s"
@@ -525,12 +539,6 @@ class Coursera(
   }
 
 }
-
-case class Count(count: Int)
-case class Process(size: Long)
-case class Message(filename: String, state: Boolean)
-case object Stop
-case object Progress
 
 object terminalWaitActor extends Actor {
 
@@ -652,7 +660,9 @@ class Downloader(path: String, location: String, session: String) {
   private val Buffer = 1024 * 5
   private val LOG = Logger.getLogger("coursera")
 
-  def using2[T <: { def close() }, A <: { def close() }]
+  type Closable = { def close() }
+
+  def using2[T <: Closable, A <: Closable]
       (in: T, out: A, f: => (Throwable) => Unit)
       (block: => (T, A) => Unit) {
     try {
@@ -738,7 +748,7 @@ object Main {
               optionsMap)(getAllChapters(chapters, periodChapters))
           case _ =>
             LOG.info("Should be set classname parameter either" +
-              " in a configuration file or in a command line")
+              " in a configuration file or in the command line")
             conf.printHelp()
             sys.exit(1)
       }
