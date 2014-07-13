@@ -131,6 +131,7 @@ object Coursera {
   private val CsrfTokenCookieName   = "csrf_token"
   private val PasswordFieldName     = "password"
   private val UsernameFieldName     = "email"
+  private val WebRequestFieldName   = "webrequest"
   private val ConnectionTimeout     = 3600 * 1000
   private val OkResponseCode        = 200
   private val RedirectResponseCode  = 302
@@ -184,8 +185,8 @@ object Coursera {
       chapters: Option[List[Int]],
       periodChapters: Option[List[Int]]) = {
     if (chapters.isEmpty && periodChapters.isEmpty) None
-    else if (!chapters.isEmpty && periodChapters.isEmpty) chapters
-    else if (chapters.isEmpty && !periodChapters.isEmpty)
+    else if (chapters.nonEmpty && periodChapters.isEmpty) chapters
+    else if (chapters.isEmpty && periodChapters.nonEmpty)
       getChapterPeriod(periodChapters)
     else mergeChapters(chapters, periodChapters)
   }
@@ -242,7 +243,11 @@ class Coursera(
     ) ::: requestHeaders
 
   def prepareLoginParams: List[(String, String)] =
-    List((UsernameFieldName, username), (PasswordFieldName, password))
+    List(
+      (UsernameFieldName, username),
+      (PasswordFieldName, password),
+      (WebRequestFieldName, "true")
+    )
 
   def filterCookies(cookies: List[String], filter:List[String]): String = {
     val cookiesMap = cookiesToMap(cookies mkString "; ").
