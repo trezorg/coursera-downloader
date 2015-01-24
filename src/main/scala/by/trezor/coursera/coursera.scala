@@ -5,7 +5,7 @@ import java.util.logging._
 import java.net.{HttpURLConnection, URL, URLDecoder}
 import scala.collection.JavaConverters.asScalaIteratorConverter
 import scala.language.reflectiveCalls
-import scala.concurrent.{future, Future, Await}
+import scala.concurrent.{Future, Await}
 import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
@@ -135,14 +135,11 @@ object Coursera {
   private val ConnectionTimeout     = 3600 * 1000
   private val OkResponseCode        = 200
   private val RedirectResponseCode  = 302
-  private val LectureUrl            =
-    "https://class.coursera.org/%s/lecture/index"
-  private val loginUrl              =
-    "https://accounts.coursera.org/api/v1/login"
+  private val CsrfUrl               = "https://class.coursera.org/%s"
+  private val LectureUrl            = "https://class.coursera.org/%s/lecture"
+  private val loginUrl              = "https://accounts.coursera.org/api/v1/login"
   private val ReferrerUrl           = "https://accounts.coursera.org/signin"
-  private val ClassAuthUrl          =
-    "https://class.coursera.org/%s/auth/auth_redirector?" +
-      "type=login&subtype=normal"
+  private val ClassAuthUrl          = "https://class.coursera.org/%s/auth/auth_redirector?type=login&subtype=normal"
   private val cookiesClassNames     = List(AuthCookieName, MaestroLoginFlagName)
   private val cookiesSessionNames   = List(
     AuthCookieName, CsrfTokenCookieName, MaestroLoginFlagName)
@@ -219,6 +216,7 @@ class Coursera(
   private val LOG                   = Logger.getLogger("coursera")
   private lazy val getLectureUrl    = String.format(LectureUrl, course)
   private lazy val getClassAuthUrl  = String.format(ClassAuthUrl, course)
+  private lazy val getCsrfUrl       = String.format(CsrfUrl, course)
   def isTxt(filename: String)       = txt && filename.endsWith(".txt")
   def isPdf(filename: String)       = pdf && filename.endsWith(".pdf")
   def isSrt(filename: String)       = srt && filename.endsWith(".srt")
@@ -227,7 +225,7 @@ class Coursera(
   def isZip(filename: String)       = zip && filename.endsWith(".zip")
 
   lazy val getCsrfToken: String = {
-    Http(getLectureUrl).options(courSeraHttpOptions).
+    Http(getCsrfUrl).options(courSeraHttpOptions).
       asCodeHeaders._2.get("Set-Cookie") match {
       case Some(list: List[String]) => cookiesToMap(list.head).
         getOrElse(CsrfTokenCookieName, "")
@@ -331,7 +329,7 @@ class Coursera(
     } else {
       val session = sessionHeaders(0)._2
       val tasks: List[Future[(Boolean, String)]] = chapter.map {
-        case(size, name, url) => future {
+        case(size, name, url) => Future {
           downloadFile(new File(dir, name), url, session, size)
         }
       }
@@ -342,7 +340,7 @@ class Coursera(
           case Success((false, filename)) =>
             terminalWaitActor ! Message(filename, state = false)
           case Failure(t) =>
-            CourseraOutput("An error has occurred: %s => %s" format(t.getMessage, t.getStackTraceString))
+            CourseraOutput("An error has occurred: %s => %s" format(t.getMessage, t.getStackTrace))
         }
       })
       val futures: Future[List[(Boolean, String)]] = Future.sequence(tasks)
@@ -490,7 +488,7 @@ class Coursera(
     CourseraOutput.prn(
       "[%s] - " format title, Some(Color.RED))("Getting files data...")
     val tasks: List[Future[Option[(Int, String, String)]]] =
-      files.map { url => future { getFileData(url) }}
+      files.map { url => Future { getFileData(url) }}
     val futures: Future[List[Option[(Int, String, String)]]] =
       Future.sequence(tasks)
     Await.result(futures, Duration.Inf).toList.flatten
@@ -537,7 +535,7 @@ class Coursera(
       case e: CourseraException =>
         CourseraOutput.prn(e.getMessage, Some(Color.RED))
       case e: Exception =>
-        CourseraOutput("An error has occurred: %s => %s" format(e.getMessage, e.getStackTraceString))
+        CourseraOutput("An error has occurred: %s => %s" format(e.getMessage, e.getStackTrace))
     } finally {
       terminalWaitActor ! Stop
     }
@@ -560,12 +558,16 @@ object terminalWaitActor extends Actor {
   def showProgress(timeDiff: Option[Long]) {
     pos = (pos + 1)  % 4
     clearCounter += 1
-    val currentSize = if (timeDiff.isDefined) " [%.02fKB/s]" format
-      (size * 1000 / 1024) / timeDiff.get.toFloat else ""
+    val currentSize =
+      if (timeDiff.isDefined)
+        " [%.02fKB/s]" format (size * 1000 / 1024) / timeDiff.get.toFloat
+      else ""
     val message = {
-      val text = if (count > 0)
-        "[%s]%s done: [%s/%s]".format(positions(pos), currentSize, filesDone, count)
-      else "[%s]".format(positions(pos))
+      val text =
+        if (count > 0)
+          "[%s]%s done: [%s/%s]".format(
+            positions(pos), currentSize, filesDone, count)
+        else "[%s]".format(positions(pos))
       "%s%s" format(text, "\b" * text.length)
     }
     CourseraOutput.prn(message)
