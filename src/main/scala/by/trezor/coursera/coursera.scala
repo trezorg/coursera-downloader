@@ -547,26 +547,39 @@ object terminalWaitActor extends Actor {
 
   var count = 0
   var pos = 0
-  var clearCounter = 0
-  var speedPerWheel = 10
+  var progressCounter = 0
+  var maxProgressCounter = 10
   var filesDone = 0
   var size: Long = 0
   var time: Long = 0
   val positions = Array("-", "\\", "|", "/")
+  val quantifies = Array("", "KB", "MB", "GB")
   val timeToSleep = 300
+
+  def getSpeed(timeDiff: Long): (Double, String) = {
+
+    def loop(size: Double, index: Int): (Double, Int) = {
+      if (size > 1024 && index < quantifies.length - 1) loop(size / 1024, index + 1)
+      else (size, index)
+    }
+
+    val (sz, ind) = loop((size.toDouble / timeDiff) * 1000, 0)
+    (sz, quantifies(ind))
+
+  }
 
   def showProgress(timeDiff: Option[Long]) {
     pos = (pos + 1)  % 4
-    clearCounter += 1
-    val currentSize =
-      if (timeDiff.isDefined)
-        " [%.02fKB/s]" format (size * 1000 / 1024) / timeDiff.get.toFloat
+    val currentSpeed =
+      if (timeDiff.isDefined) {
+        val (fSize, quantify) = getSpeed(timeDiff.get)
+        " [%.02f%s/s]" format (fSize, quantify)
+      }
       else ""
     val message = {
       val text =
         if (count > 0)
-          "[%s]%s done: [%s/%s]".format(
-            positions(pos), currentSize, filesDone, count)
+          "[%s]%s done: [%s/%s]".format(positions(pos), currentSpeed, filesDone, count)
         else "[%s]".format(positions(pos))
       "%s%s" format(text, "\b" * text.length)
     }
@@ -588,10 +601,11 @@ object terminalWaitActor extends Actor {
           val curTime = System.currentTimeMillis
           val diff = curTime - time
           showProgress(Some(diff))
-          if ((clearCounter % speedPerWheel) == 0) {
+          progressCounter += 1
+          if (progressCounter % maxProgressCounter == 0) {
             time = curTime
             size = 0
-            clearCounter = 0
+            progressCounter = 0
           }
         case Count(cnt: Int) =>
           count = cnt
@@ -696,7 +710,7 @@ class Downloader(path: String, location: String, session: String) {
       ) { (in, out) =>
       var count = 0
       val buffer: Array[Byte] = new Array[Byte](Buffer)
-      while ({ count = in.read(buffer, 0, Buffer); count != -1}) {
+      while ({count = in.read(buffer, 0, Buffer); count != -1}) {
         out.write(buffer, 0, count)
         terminalWaitActor ! Process(count)
       }
@@ -726,14 +740,14 @@ object Main {
     val directory  = if (conf.directory.isEmpty) new File(".").getCanonicalPath
       else conf.directory()
     val optionsMap = Map(
-      "info" -> conf.info(),
-      "update" -> conf.force(),
-      "pdf" -> conf.pdf(),
-      "txt" -> conf.txt(),
-      "srt" -> conf.srt(),
-      "mp4" -> conf.mp4(),
-      "pptx" -> conf.pptx(),
-      "zip" -> conf.zip()
+      "info"    -> conf.info(),
+      "update"  -> conf.force(),
+      "pdf"     -> conf.pdf(),
+      "txt"     -> conf.txt(),
+      "srt"     -> conf.srt(),
+      "mp4"     -> conf.mp4(),
+      "pptx"    -> conf.pptx(),
+      "zip"     -> conf.zip()
     )
 
     getCredentials(conf, fileName, className) match {
@@ -743,7 +757,8 @@ object Main {
           username,
           password,
           directory,
-          optionsMap)(getAllChapters(chapters, periodChapters))
+          optionsMap
+        )(getAllChapters(chapters, periodChapters))
       case (Some(username), Some(password), None) =>
         className match {
           case Some(classname) =>
@@ -752,7 +767,8 @@ object Main {
               username,
               password,
               directory,
-              optionsMap)(getAllChapters(chapters, periodChapters))
+              optionsMap
+            )(getAllChapters(chapters, periodChapters))
           case _ =>
             LOG.info("Should be set classname parameter either" +
               " in a configuration file or in the command line")
